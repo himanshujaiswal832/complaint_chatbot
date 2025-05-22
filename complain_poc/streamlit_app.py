@@ -1,120 +1,111 @@
 import streamlit as st
 import requests
-from chatbot.chatbot import get_chatbot_chain
-import sys
-
-sys.modules['torch.classes'] = None
-
-st.set_page_config(page_title="RAG Complaint Chatbot")
-st.title("Complaint Chatbot")
-
-chatbot = get_chatbot_chain()
+import re
+from chatbot.chatbot import ask_groq,load_pdf_chunks,build_vector_index,retrieve_context
 
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-    st.session_state.complaint_data = {
-        "name": "",
-        "phone_number": "",
-        "email": "",
-        "complaint_details": ""
+
+PDF_PATH = "data\CustomerFAQ.pdf"  
+
+if "model" not in st.session_state:
+    st.session_state.chunks = load_pdf_chunks(PDF_PATH)
+    model, index, chunks = build_vector_index(st.session_state.chunks)
+    st.session_state.model = model
+    st.session_state.index = index
+    st.session_state.chunks = chunks
+
+
+st.title("Complaint Filing Assistant")
+
+if "complaint" not in st.session_state:
+    st.session_state.complaint = {
+        "name": None,
+        "phone_number": None,
+        "email": None,
+        "complaint_details": None
     }
-    st.session_state.stage = "init"
-    st.session_state.complaint_id = ""
+
+if "filing_in_progress" not in st.session_state:
+    st.session_state.filing_in_progress = False
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 
-def send_to_api(data):
-    response = requests.post("http://127.0.0.1:5000/complaints", json=data)
-    return response.json() if response.status_code == 200 else {"error": "Failed to create complaint."}
+def create_complaint(data):
+    response = requests.post("http://localhost:5000/complaints", json=data)
+    return response.json()
 
-def get_complaint_by_id(cid):
-    response = requests.get(f"http://127.0.0.1:5000/complaints/{cid}")
-    return response.json() if response.status_code == 200 else None
-
-def bot_say(message):
-    st.session_state.chat_history.append(("bot", message))
-    st.write(f"**Bot:** {message}")
-
-def user_say(message):
-    st.session_state.chat_history.append(("user", message))
-    st.write(f"**You:** {message}")
+def get_complaint(complaint_id):
+    response = requests.get(f"http://localhost:5000/complaints/{complaint_id}")
+    return response.json()
 
 
-for role, msg in st.session_state.chat_history:
-    st.write(f"**{'Bot' if role == 'bot' else 'You'}:** {msg}")
+def handle_input(user_input):
+    complaint = st.session_state.complaint
+    lower_input = user_input.lower()
 
 
-if st.button("Raise a Complaint"):
-    st.session_state.stage = "collect_name"
-    bot_say("Sure! Let's raise a complaint. Please enter your full name:")
-
-if st.button("Fetch Complaint Details"):
-    st.session_state.stage = "fetch"
-
-if st.button("FAQ"):
-    st.session_state.stage = "faq"
-    bot_say("Great! What FAQ question can I help you with?")
-
-if st.session_state.stage == "fetch":
-    complaint_id_input = st.text_input("Enter Complaint ID:", key="complaint_id_input")
-    if complaint_id_input:
-        data = get_complaint_by_id(complaint_id_input.strip())
-        if data:
-            bot_say(f"""Complaint ID: {data['complaint_id']}
-Name: {data['name']}
-Phone: {data['phone_number']}
-Email: {data['email']}
-Details: {data['complaint_details']}
-Created At: {data['created_at']}""")
-        else:
-            bot_say("Sorry, no complaint found with that ID.")
-        st.session_state.stage = "init"
-
-
-user_input = st.text_input("Your input:", key="user_input")
-
-if user_input:
-    user_say(user_input)
-    stage = st.session_state.stage
-
-    if stage == "collect_name":
-        st.session_state.complaint_data["name"] = user_input.strip()
-        bot_say("Thanks. Now, your phone number?")
-        st.session_state.stage = "collect_phone"
-
-    elif stage == "collect_phone":
-        st.session_state.complaint_data["phone_number"] = user_input.strip()
-        bot_say("Great. Please provide your email address.")
-        st.session_state.stage = "collect_email"
-
-    elif stage == "collect_email":
-        st.session_state.complaint_data["email"] = user_input.strip()
-        bot_say("Got it. Lastly, describe your complaint.")
-        st.session_state.stage = "collect_details"
-
-    elif stage == "collect_details":
-        st.session_state.complaint_data["complaint_details"] = user_input.strip()
-        bot_say("Submitting your complaint...")
-        result = send_to_api(st.session_state.complaint_data)
+    id_match = re.search(r"\b[a-f0-9]{8}\b", lower_input)
+    if ("get" in lower_input or "show" in lower_input or "details" in lower_input) and id_match:
+        complaint_id = id_match.group(0)
+        result = get_complaint(complaint_id)
         if "complaint_id" in result:
-            cid = result["complaint_id"]
-            st.session_state.complaint_id = cid
-            bot_say(f"Your complaint has been registered with ID: {cid}.")
+            return f"""Complaint Details:
+**Complaint ID**: {result['complaint_id']}
+**Name**: {result['name']}
+**Phone**: {result['phone_number']}
+**Email**: {result['email']}
+**Details**: {result['complaint_details']}
+**Created At**: {result['created_at']}"""
         else:
-            bot_say("There was an error submitting your complaint.")
-        st.session_state.stage = "init"
+            return "No complaint found with that ID. Please check and try again."
 
-    elif stage == "faq" or stage == "faq_continue":
-        if user_input.lower().strip() in ["exit", "main menu", "no"]:
-            bot_say("Returning to main menu.")
-            st.session_state.stage = "init"
-        else:
-            prompt = (
-                f"You are a helpful customer support assistant. "
-                f"Answer the following frequently asked question clearly and concisely:\n\n"
-                f"Question: {user_input}"
-            )
-            answer = chatbot.run(prompt)
-            bot_say(answer)
-            bot_say("Would you like to ask another FAQ? Type 'exit' to return to the main menu.")
-            st.session_state.stage = "faq_continue"
+  
+    if not st.session_state.filing_in_progress and re.search(r"(file|raise|register|submit).*complaint", lower_input):
+        st.session_state.filing_in_progress = True
+        return "I'm sorry to hear that. Let's get it sorted. What's your **name**?"
+
+  
+    if st.session_state.filing_in_progress:
+        if not complaint["name"]:
+            complaint["name"] = user_input
+            return "Thank you! What is your phone number?"
+
+        elif not complaint["phone_number"]:
+            complaint["phone_number"] = user_input
+            return "Got it. What is your email address?"
+
+        elif not complaint["email"]:
+            complaint["email"] = user_input
+            return "Thanks! Could you please describe your complaint?"
+
+        elif not complaint["complaint_details"]:
+            complaint["complaint_details"] = user_input
+            result = create_complaint(complaint)
+            st.session_state.complaint = {
+                "name": None,
+                "phone_number": None,
+                "email": None,
+                "complaint_details": None
+            }
+            st.session_state.filing_in_progress = False
+            return f"Your complaint has been registered with ID: **{result['complaint_id']}**."
+
+ 
+    if "lost" in lower_input and "complaint id" in lower_input:
+        return "To recover your Complaint ID, please contact support or provide your registered email and phone (feature coming soon)."
+
+    context = retrieve_context(user_input, st.session_state.model, st.session_state.index, st.session_state.chunks, top_k=3)
+    return ask_groq(user_input, context)
+
+
+user_input = st.chat_input("How can I help you today?")
+if user_input:
+    st.session_state.messages.append(("user", user_input))
+    bot_response = handle_input(user_input)
+    st.session_state.messages.append(("bot", bot_response))
+
+for sender, msg in st.session_state.messages:
+    with st.chat_message(sender):
+        st.markdown(msg)
